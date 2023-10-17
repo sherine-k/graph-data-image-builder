@@ -12,11 +12,11 @@ import (
 	"compress/gzip"
 
 	"github.com/containers/buildah"
-	"github.com/containers/buildah/pkg/parse"
 	"github.com/containers/common/pkg/config"
-	is "github.com/containers/image/v5/storage"
+	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/storage"
 	"github.com/containers/storage/pkg/unshare"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -103,22 +103,28 @@ func untar(src, dest string) error {
 func main() {
 	// inspired from https://github.com/containers/buildah/blob/main/docs/tutorials/04-include-in-your-build-tool.md
 	if buildah.InitReexec() {
-		os.Exit(1)
+		return
 	}
 	unshare.MaybeReexecUsingUserNamespace(false)
 
+	logger := logrus.New()
+	logger.Level = logrus.DebugLevel
 	buildStoreOptions, err := storage.DefaultStoreOptionsAutoDetectUID()
-	//buildStoreOptions, err := storage.DefaultStoreOptions(unshare.GetRootlessUID() > 0, unshare.GetRootlessUID())
 	if err != nil {
 		fmt.Printf("%v", err)
 		os.Exit(1)
 	}
+
+	// fmt.Printf("buildStoreOptions: \n%v\n", buildStoreOptions)
 
 	conf, err := config.Default()
 	if err != nil {
 		fmt.Printf("%v", err)
 		os.Exit(1)
 	}
+
+	// fmt.Printf("conf: \n%v\n", conf)
+
 	capabilitiesForRoot, err := conf.Capabilities("root", nil, nil)
 	if err != nil {
 		fmt.Printf("%v", err)
@@ -134,14 +140,9 @@ func main() {
 	builderOpts := buildah.BuilderOptions{
 		FromImage:    graphBaseImage,
 		Capabilities: capabilitiesForRoot,
+		Logger:       logger,
 	}
 	builder, err := buildah.NewBuilder(context.TODO(), buildStore, builderOpts)
-	if err != nil {
-		fmt.Printf("%v", err)
-		os.Exit(1)
-	}
-
-	isolation, err := parse.IsolationOption("")
 	if err != nil {
 		fmt.Printf("%v", err)
 		os.Exit(1)
@@ -169,25 +170,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	// According to https://docs.openshift.com/container-platform/4.13/updating/updating-restricted-network-cluster/restricted-network-update-osus.html#update-service-graph-data_updating-restricted-network-cluster-osus
-	//mkdir -p /var/lib/cincinnati-graph-data  && tar xvzf cincinnati-graph-data.tar.gz -C /var/lib/cincinnati-graph-data/ --no-overwrite-dir --no-same-owner
-	err = builder.Run([]string{"sh", "-c", "mkdir -p /var/lib/cincinnati-graph-data  && tar xvzf cincinnati-graph-data.tar.gz -C /var/lib/cincinnati-graph-data/ --no-overwrite-dir --no-same-owner"}, buildah.RunOptions{Isolation: isolation, Terminal: buildah.WithoutTerminal})
-	// also tried
-	// err = builder.Run([]string{"sh", "-c", "ls "}, buildah.RunOptions{Isolation: isolation, Terminal: buildah.WithoutTerminal})
-	// but didnt work either
+	graphDataUntarFolder := "graph-data-untarred"
+	err = untar(graphDataArchive, graphDataUntarFolder)
 	if err != nil {
 		fmt.Printf("%v", err)
 		os.Exit(1)
 	}
-	//this also failed: use `untar` to save to graphDataUntarFolder , then add the folder
-	// err = builder.Add(graphDataDir, false, addOptions, graphDataUntarFolder)
-	// if err != nil {
-	// 	fmt.Printf("%v", err)
-	// 	os.Exit(1)
-	// }
-	// fmt.Printf("after adding the layer")
+	addOptions := buildah.AddAndCopyOptions{Chown: "0:0", PreserveOwnership: false}
+	addErr := builder.Add(graphDataDir, false, addOptions, graphDataUntarFolder)
+	if addErr != nil {
+		fmt.Printf("%v", addErr)
+		os.Exit(1)
+	}
+	fmt.Printf("after adding the layer")
 	builder.SetCmd([]string{"/bin/bash", "-c", fmt.Sprintf("exec cp -rp %s/* %s", graphDataDir, graphDataMountPath)})
-	imageRef, err := is.Transport.ParseStoreReference(buildStore, "docker://localhost:5000/"+graphImageName)
+	imageRef, err := alltransports.ParseImageName("docker://localhost:7000/" + graphImageName)
 	if err != nil {
 		fmt.Printf("%v", err)
 		os.Exit(1)
